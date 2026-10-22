@@ -1,0 +1,894 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSupervisor() {
+      return request.auth != null
+        && exists(/databases/$(database)/documents/roles/$(request.auth.uid))
+        && get(/databases/$(database)/documents/roles/$(request.auth.uid)).data.role == 'supervisor';
+    }
+    match /roles/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSupervisor();
+    }
+    match /users/{uid}/chats/{chatId} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSupervisor();
+    }
+    // Collection-group rule: required separately from the nested-path rule
+    // above. Without this, collectionGroup(db, "chats") queries always get
+    // permission-denied, even when the nested-path rule is correct, because
+    // Firestore does not apply per-path rules to collection group reads.
+    match /{path=**}/chats/{chatId} {
+      allow read: if isSupervisor();
+    }
+    match /users/{uid}/usage/{docId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSupervisor();
+      allow write: if false;
+    }
+    match /users/{uid}/imageUsage/{docId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSupervisor();
+      allow write: if false;
+    }
+    // Neribo Operations Actions page — suspended/flagged status
+    // (functions/_shared/accountStatus.js) and the best-effort
+    // last-known-IP record (used only by the Ban IP Address action).
+    // Both are written exclusively by the trusted backend's
+    // service-account credential, which bypasses these rules entirely —
+    // "write: if false" here is a genuine, not cosmetic, restriction on
+    // every client, Operations included, same as usage/imageUsage above.
+    match /users/{uid}/meta/{docId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSupervisor();
+      allow write: if false;
+    }
+    match /operationsFeedback/{feedbackId} {
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.uid;
+      allow read, list: if isSupervisor();
+      allow update, delete: if false;
+    }
+    // Supervisor "Deleted → Messages" — one archived message per doc,
+    // written client-side by src/lib/chatPersistence.ts's
+    // archiveDeletedThread() the moment before the real conversation
+    // doc is deleted (see users/{uid}/chats/{id} below). Same
+    // create-only-for-your-own-uid / Supervisor-read shape as
+    // operationsFeedback just above: the deleting user can add their
+    // own archive entries, nobody (not even that same user) can ever
+    // read, edit, or remove one afterward — only a Supervisor account
+    // can read this collection back, via Deleted → Messages.
+    match /deletedMessages/{archiveId} {
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.uid;
+      allow read, list: if isSupervisor();
+      allow update, delete: if false;
+    }
+    // Supervisor "Deleted → Users" — one archived account per doc (doc
+    // id == the deleted account's original uid), written only by the
+    // trusted backend service account in
+    // functions/api/admin/delete-account.js via the Firestore REST
+    // client (firestoreClient.js's putDocument), which authenticates as
+    // the service account and so bypasses these rules entirely, the
+    // same as every other server-authored collection in this file (see
+    // operationsAuditLog below). No client, Supervisor or otherwise,
+    // can ever write here — only read it back.
+    match /deletedAccounts/{uid} {
+      allow read, list: if isSupervisor();
+      allow write: if false;
+    }
+    match /operationsEvents/{eventId} {
+      allow read, list: if isSupervisor();
+      allow create: if request.auth != null;
+      allow update, delete: if false;
+    }
+    // Neribo Operations Actions page — IP-ban list. Written only by the
+    // trusted backend's service-account credential (functions/_shared/
+    // ipBans.js), never by any client; Supervisors can read it here for
+    // visibility, but every ban/unban still goes through the Actions
+    // page's endpoints, never a direct client write.
+    match /bannedIps/{ip} {
+      allow read, list: if isSupervisor();
+      allow write: if false;
+    }
+    // Neribo Operations Actions page — audit trail of privileged
+    // account-management actions (functions/_shared/operationsAudit.js).
+    // Unlike operationsEvents above, nothing here is ever client-written
+    // — only the trusted backend's service account writes it — so this
+    // stays read-only for every client, Operations included.
+    match /operationsAuditLog/{entryId} {
+      allow read, list: if isSupervisor();
+      allow write: if false;
+    }
+    // Neribo Operations "App Settings" page — the single source of truth
+    // for values (like the app version) the public application displays.
+    // Readable by any signed-in user (that's the whole point — every
+    // public surface reads this live rather than hardcoding a value);
+    // writes only ever happen through functions/api/admin/set-app-version.js's
+    // service-account credential, never directly from any client,
+    // Supervisor included.
+    match /appConfig/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    // Neribo Operations "AI Model" page — the Supervisor-edited custom
+    // instructions and provider-failure messages for the AI
+    // (functions/_shared/aiConfig.js). Deliberately NOT under appConfig
+    // above: appConfig is readable by every signed-in user, and a system
+    // prompt must not be. Supervisor-read only; writes only ever happen
+    // through functions/api/admin/set-ai-config.js's service-account
+    // credential, never directly from any client, Supervisor included.
+    match /aiConfig/{docId} {
+      allow read: if isSupervisor();
+      allow write: if false;
+    }
+    // Neribo Operations "System Console" — Diagnostics section
+    // (Phase 3), written by src/lib/diagnostics.ts's reportDiagnostic()
+    // and src/components/ErrorBoundary.tsx. Deliberately a separate
+    // collection from operationsEvents above (see src/types.ts's
+    // DiagnosticRecord for why) — reads are Supervisor-only just like
+    // operationsEvents, but unlike operationsEvents, `create` is open
+    // to every request, signed in or not.
+    //
+    // That's a genuine difference, not copy-paste: this collection
+    // exists specifically to catch a crashed render tree, an uncaught
+    // JS error, or an unhandled promise rejection — none of which wait
+    // for Firebase Auth to resolve first. Neribo's own onAuthStateChanged
+    // listener (src/App.tsx) is itself asynchronous, so any of these can
+    // fire while `auth.currentUser` is still null — during the initial
+    // load's authLoading window, on the pre-sign-in AuthScreen, or after
+    // a session's ID token has already expired — and a diagnostic that
+    // silently failed to write in exactly the moments something is
+    // actually broken would defeat the point of this page. No sensitive
+    // data ever reaches a diagnosticsEvents document to begin with (see
+    // reportDiagnostic's own file-header caution against ever passing it
+    // one), so opening `create` this far carries the same low risk
+    // operationsEvents already accepts from any signed-in user, just
+    // extended to cover the moments before/around sign-in too.
+    match /diagnosticsEvents/{eventId} {
+      allow read, list: if isSupervisor();
+      allow create: if true;
+      allow update, delete: if false;
+    }
+    // Neribo Operations "System Console" — Notifications section
+    // (Phase 2). Single source of truth for real-time Supervisor-facing
+    // alerts, written via src/lib/notifications.ts's notify(). Unlike
+    // operationsEvents (created by any signed-in user, since regular
+    // users trigger those unintentionally), the sole audience AND the
+    // sole set of writers here are Supervisor accounts — every notify()
+    // call site is other Operations tooling (Bug Management, Activity
+    // Monitor in later phases) — so create is scoped to isSupervisor()
+    // rather than left open to any authenticated user.
+    match /notifications/{notificationId} {
+      allow read, list: if isSupervisor();
+      allow create: if isSupervisor();
+      // Marking read/unread only ever touches `readBy`, and only ever
+      // adds or removes the requesting Supervisor's own uid — this can
+      // never mark another Supervisor's copy of the feed read/unread.
+      allow update: if isSupervisor()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy'])
+        && request.resource.data.readBy is list
+        && request.resource.data.readBy.toSet().difference(resource.data.readBy.toSet()).hasOnly([request.auth.uid])
+        && resource.data.readBy.toSet().difference(request.resource.data.readBy.toSet()).hasOnly([request.auth.uid]);
+      allow delete: if false;
+    }
+    // Neribo Operations "System Console" — Bug Management section
+    // (Phase 4). The curated counterpart to diagnosticsEvents above —
+    // same "raw events vs. curated record" relationship operationsEvents
+    // has to operationsAuditLog — one bugRecords/{id} document per
+    // deterministic fingerprint (src/lib/bugFingerprint.ts), built by a
+    // live Supervisor-session rollup (src/hooks/useBugRollup.ts) over
+    // diagnosticsEvents and triaged (status/priority) directly by a
+    // Supervisor (src/lib/bugManagement.ts).
+    //
+    // Unlike diagnosticsEvents, this is curated triage data, not a raw
+    // public-writable event stream, so every read AND every write —
+    // both the rollup's aggregate writes and a Supervisor's own
+    // status/priority changes — require isSupervisor(), with no open
+    // `create` the way diagnosticsEvents has. That's what makes the
+    // occurrence-count rollup unforgeable: an arbitrary signed-out (or
+    // signed-in, non-Supervisor) client can create as many
+    // diagnosticsEvents as its own throttle allows, but can never
+    // itself write a single field of any bugRecords document, so it can
+    // never fabricate or inflate an occurrence count on an existing bug
+    // no matter what it sends.
+    match /bugRecords/{bugId} {
+      allow read, list: if isSupervisor();
+      allow create: if isSupervisor()
+        && request.resource.data.status == 'new'
+        && request.resource.data.priority in ['urgent', 'high', 'medium', 'low']
+        && request.resource.data.occurrenceCount is int
+        && request.resource.data.occurrenceCount > 0;
+      // The rollup only ever touches the aggregate fields; a Supervisor
+      // triaging from BugDetailPanel only ever touches status/priority
+      // (see src/lib/bugManagement.ts) — either is allowed here, but
+      // nothing outside this fixed field set ever is, and `fingerprint`/
+      // `category`/`createdAt` — a bug's identity and origin — can never
+      // be changed by any client once created.
+      allow update: if isSupervisor()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'occurrenceCount', 'firstSeen', 'lastSeen', 'sampleMessage',
+          'sampleContext', 'highestSeverity', 'status', 'priority', 'updatedAt'
+        ])
+        && request.resource.data.status in [
+          'new', 'investigating', 'in-progress', 'fixed', 'verified', 'closed', 'ignored'
+        ]
+        && request.resource.data.priority in ['urgent', 'high', 'medium', 'low']
+        && request.resource.data.occurrenceCount is int
+        && request.resource.data.occurrenceCount >= resource.data.occurrenceCount;
+      allow delete: if false;
+    }
+    // Neribo Operations "System Console" — Activity Monitor section
+    // (Phase 5), written by src/lib/activityMonitor.ts's recordSignIn(),
+    // fired once per fresh sign-in from src/App.tsx's onAuthStateChanged
+    // listener. A separate collection from operationsEvents and
+    // operationsAuditLog above — not a repurposing of either (see
+    // src/types.ts's ActivitySessionRecord for why).
+    //
+    // Same ownership-check shape as operationsFeedback above: any
+    // signed-in client may create, but only a record naming its own
+    // uid — request.auth.uid must match request.resource.data.uid,
+    // so no client can ever write a session record for another
+    // account. Reads are Supervisor-only, same as operationsEvents.
+    match /activitySessions/{sessionId} {
+      allow read, list: if isSupervisor();
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.uid;
+      allow update, delete: if false;
+    }
+    // Neribo Operations "System Console" — Usage Analytics section
+    // (Phase 6), written by src/lib/usageAnalytics.ts. Observational
+    // behavior analytics only — never message content, never the
+    // per-user quota/rate-limit data (users/{uid}/usage,
+    // users/{uid}/imageUsage above, both write:false and untouched by
+    // this phase).
+    //
+    // usageSessions: one doc per continuous period of app use. Same
+    // ownership shape as activitySessions above (any signed-in client
+    // may create, only naming its own uid) but also allows a scoped
+    // update — src/lib/usageAnalytics.ts patches its own already-created
+    // session in place (lastHeartbeat while active, endedAt on the way
+    // out) rather than creating a new doc per heartbeat, so update can't
+    // be `if false` the way activitySessions' is. `resource.data.uid`
+    // (the existing doc's owner) is what's checked, not the incoming
+    // payload, so a client can never repoint an existing session at a
+    // different uid, and the diff is restricted to exactly the two
+    // fields the tracker ever patches.
+    match /usageSessions/{sessionId} {
+      allow read, list: if isSupervisor();
+      allow create: if request.auth != null && request.auth.uid == request.resource.data.uid;
+      allow update: if request.auth != null
+        && request.auth.uid == resource.data.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastHeartbeat', 'endedAt']);
+      allow delete: if false;
+    }
+    // usageEvents: one doc per batched flush of queued screen-view/
+    // interaction events (never one doc per event — see
+    // src/lib/usageAnalytics.ts's flushQueue()). Same "any signed-in
+    // client creates, naming only its own uid" shape as usageSessions,
+    // plus a bounded size check on `events` so a malicious client can't
+    // use this open `create` to write an arbitrarily large payload —
+    // the tracker itself never queues past MAX_QUEUE_BEFORE_FORCED_FLUSH
+    // (20) before forcing a flush, so 50 leaves comfortable headroom
+    // without opening the door to unbounded documents. Never updated or
+    // deleted once written, same as operationsEvents/diagnosticsEvents.
+    match /usageEvents/{batchId} {
+      allow read, list: if isSupervisor();
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.uid
+        && request.resource.data.events is list
+        && request.resource.data.events.size() > 0
+        && request.resource.data.events.size() <= 50;
+      allow update, delete: if false;
+    }
+    // Neribo Operations "System Console" — Security Monitor (new
+    // section, added by this phase). An origin/request-integrity
+    // SIGNAL sitting in front of the admin API surface, modeled on the
+    // Hotel HMS reference implementation described in the phase brief
+    // — never a security boundary by itself; every endpoint's real
+    // Supervisor-role check (roles/{uid}, enforced above) stays exactly
+    // as it is today.
+    //
+    // security_events: one document per flagged (missing/mismatched
+    // origin) admin-API request, written only by
+    // functions/_shared/securityMonitor.js via the trusted backend's
+    // service-account credential — which bypasses these rules entirely,
+    // same as operationsAuditLog above. `write: if false` here is
+    // genuine for every client, Supervisor included: acknowledging,
+    // resolving, or reopening an event goes exclusively through
+    // functions/api/admin/update-security-event.js's own Supervisor
+    // gate, never a direct Firestore write — this collection must stay
+    // tamper-proof to be trustworthy as a security record.
+    match /security_events/{eventId} {
+      allow read, list: if isSupervisor();
+      allow write: if false;
+    }
+    // security_settings: the Supervisor-configured allowlist of
+    // approved frontend origins that security_events above is compared
+    // against. Same "read via rules, write only through a dedicated
+    // backend endpoint" shape as appConfig above — writes only ever
+    // happen through functions/api/admin/set-security-origins.js's
+    // service-account credential, never directly from any client.
+    match /security_settings/{docId} {
+      allow read: if isSupervisor();
+      allow write: if false;
+    }
+    // Neribo Operations "Device Settings" — Device PIN (inactivity-lock
+    // second factor for Supervisor accounts, see
+    // src/components/operations/DeviceSettingsPanel.tsx). Unlike
+    // security_settings above, these are never even Supervisor-readable
+    // from the client: devicePins holds a PIN hash, and firestore.rules
+    // cannot hide individual fields of a document from a reader who can
+    // read it at all, so the only safe rule is no client read of any
+    // kind. Every read and write goes exclusively through
+    // functions/api/device/*.js's service-account credential, which
+    // bypasses these rules entirely, same as security_events/
+    // operationsAuditLog above. Already covered by the catch-all
+    // `match /{document=**}` deny at the end of this file — spelled out
+    // here anyway, for the same documentation reasons every other
+    // collection above is.
+    match /deviceRegistrations/{registrationId} {
+      allow read, write: if false;
+    }
+    match /devicePins/{registrationId} {
+      allow read, write: if false;
+    }
+    match /deviceRegistrationIndex/{uid} {
+      allow read, write: if false;
+    }
+    // Showcase (Phase 1 of the Showcase/Orders build) — the curated
+    // portfolio of downloadable projects/templates Westly posts himself,
+    // managed from Operations -> Showcase Management
+    // (src/components/operations/ShowcaseManagementPanel.tsx) and
+    // read/written by src/lib/showcasePersistence.ts.
+    //
+    // READ: a Supervisor can read every item (active or not, so the
+    // management panel can show paused items too). Any other signed-in
+    // account can read ONLY items with `active == true` — and because
+    // Firestore rules are not filters, that account's query must itself
+    // carry `where("active", "==", true)` (loadActiveShowcaseItems does),
+    // otherwise the whole query is rejected rather than silently trimmed.
+    //
+    // WRITE: Supervisor-only, for create, update AND delete — no other
+    // account can ever write to this collection, so no non-Supervisor can
+    // create an active item at an arbitrary price. The same field
+    // allowlist/type checks apply to the Supervisor too, so a client bug
+    // (or a hand-crafted request from a Supervisor session) can't store
+    // arbitrary extra fields, a negative price, or a non-http(s) liveUrl
+    // (which the Live page renders as a link).
+    //
+    // PHASE 10 adds two OPTIONAL fields, both for custom-URL items:
+    //   detailsBrief  string | null  — 1..8000 characters when present
+    //   imageSlots    list | null    — 1..12 maps { label, description }
+    //                                  label 1..60 chars, description 0..300
+    // Both may be absent or null (an item with neither, e.g. a raw-code-only
+    // item, is completely valid); an empty string / empty list is refused —
+    // null is the single "none" value. Because rules cannot loop, each slot
+    // index is checked by its own line below, so the slot cap directly sets
+    // this rule's cost per request. 12 keeps the worst case (a full 12-slot
+    // list plus an 8000-char brief) at roughly three quarters of Firestore's
+    // 1,000-expression per-request limit by a rough node count (a 20-slot
+    // cap measured over it), so 12 is the deliberate ceiling. If a full
+    // 12-slot save is ever refused with an expression-limit error, LOWER the
+    // cap (here and in SHOWCASE_INTAKE_LIMITS.maxImageSlots in
+    // src/lib/showcasePersistence.ts) rather than raise it. Raising it means
+    // adding more isValidImageSlotAt lines here, the same constant, and
+    // re-testing a full list in the Rules Playground. These fields are
+    // covered by the same Supervisor-only write gate as every other field
+    // (the `allow create, update` line below is a whole-document gate) and,
+    // like every other field, are readable by any signed-in account for an
+    // ACTIVE item — see docs/PHASE_10_HANDOFF.md.
+    //
+    // `fileRef` is a placeholder Storage path for Phase 2 and is readable
+    // along with the rest of an active item by any signed-in account. It
+    // is a path only — the bucket is private and only ever reached via
+    // server-issued signed URLs — but if Phase 2 wants the path itself
+    // hidden from regular users, move it to a Supervisor-only document
+    // rather than relying on this rule to hide one field.
+    match /showcaseItems/{itemId} {
+      function isNullOrPositiveNumber(v) {
+        return v == null || (v is number && v > 0);
+      }
+      function isNullOrShortString(v, maxLen) {
+        return v == null || (v is string && v.size() <= maxLen);
+      }
+      // Phase 10. null, or a non-empty string of at most 8000 characters.
+      function isNullOrValidDetailsBrief(v) {
+        return v == null || (v is string && v.size() > 0 && v.size() <= 8000);
+      }
+      // Phase 10. One slot map: exactly the keys label + description, label
+      // 1..60 chars, description 0..300 chars. A missing key makes the
+      // field access below error, and an error in an allow condition denies
+      // (fail closed), so no separate hasAll is needed.
+      function isValidImageSlot(s) {
+        return s is map
+          && s.keys().hasOnly(['label', 'description'])
+          && s.label is string && s.label.size() > 0 && s.label.size() <= 60
+          && s.description is string && s.description.size() <= 300;
+      }
+      // A slot index past the end of the list is fine; one that exists must
+      // be a valid slot. `||` short-circuits, so l[i] is only read when it
+      // exists.
+      function isValidImageSlotAt(l, i) {
+        return l.size() <= i || isValidImageSlot(l[i]);
+      }
+      // Phase 10. null, or a list of 1..12 valid slots (rules can't loop, so
+      // one call per index — see the header note on why the cap is 12).
+      function isNullOrValidImageSlots(v) {
+        return v == null
+          || (v is list && v.size() > 0 && v.size() <= 12
+              && isValidImageSlotAt(v, 0)
+              && isValidImageSlotAt(v, 1)
+              && isValidImageSlotAt(v, 2)
+              && isValidImageSlotAt(v, 3)
+              && isValidImageSlotAt(v, 4)
+              && isValidImageSlotAt(v, 5)
+              && isValidImageSlotAt(v, 6)
+              && isValidImageSlotAt(v, 7)
+              && isValidImageSlotAt(v, 8)
+              && isValidImageSlotAt(v, 9)
+              && isValidImageSlotAt(v, 10)
+              && isValidImageSlotAt(v, 11));
+      }
+      function isValidShowcaseItem(d) {
+        return d.keys().hasOnly([
+            'title', 'description', 'priceCode', 'priceUrl', 'active',
+            'fileRef', 'liveUrl', 'detailsBrief', 'imageSlots',
+            'createdAt', 'updatedAt'
+          ])
+          && d.keys().hasAll(['title', 'description', 'active', 'createdAt', 'updatedAt'])
+          && d.title is string && d.title.size() > 0 && d.title.size() <= 200
+          && d.description is string && d.description.size() <= 5000
+          && d.active is bool
+          && isNullOrPositiveNumber(d.get('priceCode', null))
+          && isNullOrPositiveNumber(d.get('priceUrl', null))
+          && isNullOrShortString(d.get('fileRef', null), 500)
+          && (d.get('liveUrl', null) == null
+              || (d.liveUrl is string && d.liveUrl.size() <= 2000 && d.liveUrl.matches('https?://.+')))
+          && isNullOrValidDetailsBrief(d.get('detailsBrief', null))
+          && isNullOrValidImageSlots(d.get('imageSlots', null))
+          && d.createdAt is string
+          && d.updatedAt is string;
+      }
+      allow read: if isSupervisor()
+        || (request.auth != null && resource.data.active == true);
+      allow create, update: if isSupervisor() && isValidShowcaseItem(request.resource.data);
+      allow delete: if isSupervisor();
+    }
+    // Orders (Phase 4 of the Showcase/Orders build) — one document per
+    // Showcase purchase (or, before payment, per free "Add to Orders"
+    // bookmark), read/written by src/lib/ordersPersistence.ts. Same
+    // per-uid ownership pattern as users/{uid}/chats above, expressed as a
+    // `uid` field because orders is a top-level collection (a Supervisor
+    // needs to list every user's orders in one query).
+    //
+    // READ: the owner (resource.data.uid == request.auth.uid) or a
+    // Supervisor. Rules aren't filters — a regular account's query must
+    // carry where("uid", "==", <own uid>) (loadOrders/subscribeToOrders
+    // do), otherwise the whole query is rejected rather than trimmed.
+    //
+    // CREATE (owner only): a FREE bookmark and nothing else — status
+    // `pending_payment`, type/amount/paystackReference all null, uid =
+    // the caller, the doc's own `id` = its document id, and the item must
+    // exist, be active, and match the stored title. Refused while
+    // appConfig/checkout-enabled is explicitly false. No client can ever
+    // create an order that starts life as paid.
+    //
+    // UPDATE, two paths that can never overlap in what they may touch:
+    //   - Owner, only while the order is still `pending_payment`, only
+    //     `type` + `amount` + `updatedAt`: choosing (or clearing) the paid
+    //     path. A chosen `amount` must EQUAL the Showcase item's real
+    //     price for that type (read from showcaseItems right here), so a
+    //     client can't even record a tampered amount. (The amount actually
+    //     charged is re-derived server-side by initialize.js regardless.)
+    //   - Supervisor, only `status` + `paystackReference` + `updatedAt`
+    //     (manual override — e.g. a payment that succeeded but whose
+    //     webhook never landed). Status must be one of the six valid
+    //     values (PHASE 11 added 'awaiting_images').
+    // `status` and `paystackReference` are therefore never client-writable
+    // by an order's owner: only the payment webhook (service account,
+    // bypasses these rules) and a Supervisor can change them — with the
+    // ONE exception below.
+    //
+    // PHASE 6 introduced a third update path here, for the owner of a
+    // custom-URL order to submit a fixed-shape `cloneDetails` object and move
+    // `status` from 'awaiting_details' to 'in_progress' directly (gated by
+    // isValidCloneDetails). PHASE 14 REMOVED that path (isValidOwnerIntake) —
+    // see the PHASE 14 note near the bottom of this comment block for why.
+    // isValidCloneDetails itself is left in this file (still used to type old
+    // stored `cloneDetails` in Supervisor-facing reasoning below) but no
+    // longer has any write path pointing at it.
+    //
+    // PHASE 11 — the AI-driven intake writes NOTHING through these rules, on
+    // purpose. When a custom-URL customer finishes the conversation,
+    // functions/api/orders/intake-chat.js (service account, bypasses rules)
+    // validates it against the Showcase item's brief and itself sets
+    // `cloneDetailsV2` and the next status ('awaiting_images' if the item has
+    // image slots, else 'in_progress'). A rule that let the OWNER write those
+    // fields would let a customer skip the conversation and its server-side
+    // validation, so there is deliberately no owner path for them: the
+    // owner-choice path's `hasOnly` list excludes `cloneDetailsV2`,
+    // `isValidNewOrder` excludes it, and the Supervisor override excludes it
+    // — so no client can create or change it.
+    // `cloneImages` is different: PHASE 12 below gives the owner a narrow,
+    // shape-checked append path for it, made safe by the `verified` flag
+    // described there rather than by excluding the field entirely. What the
+    // rules DO need for Phase 11 is only that a Supervisor can set/keep the
+    // new 'awaiting_images' status (isValidSupervisorOverride below).
+    //
+    // PHASE 12 — a fourth update path, for the owner of a custom-URL order
+    // that is awaiting_images: appending ONE entry to `cloneImages` per
+    // write (only `cloneImages` + `updatedAt`; the array's existing entries
+    // are frozen — a write may only extend it by exactly one), with a fixed
+    // entry shape (isValidCloneImageEntry). This is a client-visible RECORD
+    // of an upload attempt, not a way to make Telegram receive an image: the
+    // real upload always goes through functions/api/orders/upload-clone-image.js
+    // (service account, bypasses these rules), which is the only thing that
+    // ever calls Telegram. That function stamps every entry IT writes with
+    // `verified: true` — a key this rule's isValidCloneImageEntry does NOT
+    // allow the client to set (`hasOnly` excludes it) — and every place that
+    // decides anything from `cloneImages` (whether a slot is filled, whether
+    // the order is complete, what a customer or Supervisor is told is
+    // "received") reads ONLY entries where `verified == true`
+    // (functions/_shared/cloneImages.js: verifiedEntries /
+    // src/lib/ordersPersistence.ts: toCloneImages keeps the flag through).
+    // So a client-written entry here can never mark a slot filled, can never
+    // complete an order, and is overwritten the next time the upload
+    // function itself writes the order (it rebuilds `cloneImages` from only
+    // the verified entries). It exists so the owner path this collection
+    // otherwise offers (create a bookmark, choose a type, submit intake) is
+    // consistent for this step too, without weakening what actually gates
+    // completion.
+    //
+    // PHASE 14 — closed the legacy intake bypass. Phase 11 deliberately left
+    // the OLD Phase 6 owner-intake path (isValidOwnerIntake) in place while
+    // the new AI-driven chat was rolled out, so that a browser tab still on
+    // an old build (or a hand-built Firestore write copying the old shape)
+    // could not be broken by the deploy. Now that the chat (Phase 11) and
+    // image upload (Phase 12) are both live and verified, that path is
+    // REMOVED: there is no longer any owner-write rule that can set
+    // `cloneDetails` (old shape) or move an order from 'awaiting_details' to
+    // 'in_progress' directly. The ONLY way an order reaches 'in_progress'
+    // (or 'awaiting_images') from 'awaiting_details' now is
+    // functions/api/orders/intake-chat.js's trusted service-account write,
+    // which bypasses these rules entirely and is unaffected by this removal.
+    // Old orders that already have a `cloneDetails` field from before this
+    // phase are untouched (isValidCloneDetails / CLONE_DETAILS_LIMITS /
+    // toCloneDetails all still exist purely for reading/displaying them) —
+    // this phase only removes the WRITE path, never touches stored data.
+    //
+    // DELETE: nobody. Orders are a payment record and are never removed.
+    match /orders/{orderId} {
+      function isCheckoutOn() {
+        return !exists(/databases/$(database)/documents/appConfig/checkout-enabled)
+          || get(/databases/$(database)/documents/appConfig/checkout-enabled).data.get('value', true) != false;
+      }
+      function showcaseItemOf(d) {
+        return get(/databases/$(database)/documents/showcaseItems/$(d.showcaseItemId)).data;
+      }
+      function isValidNewOrder(d) {
+        return d.keys().hasOnly([
+            'id', 'uid', 'showcaseItemId', 'showcaseItemTitle', 'type', 'status',
+            'amount', 'paystackReference', 'createdAt', 'updatedAt'
+          ])
+          && d.keys().hasAll([
+            'id', 'uid', 'showcaseItemId', 'showcaseItemTitle', 'type', 'status',
+            'amount', 'paystackReference', 'createdAt', 'updatedAt'
+          ])
+          && d.id == orderId
+          && d.uid == request.auth.uid
+          && d.showcaseItemId is string && d.showcaseItemId.size() > 0 && d.showcaseItemId.size() <= 200
+          && d.showcaseItemTitle is string && d.showcaseItemTitle.size() <= 200
+          && d.type == null
+          && d.status == 'pending_payment'
+          && d.amount == null
+          && d.paystackReference == null
+          && d.createdAt is string
+          && d.updatedAt is string
+          && exists(/databases/$(database)/documents/showcaseItems/$(d.showcaseItemId))
+          && showcaseItemOf(d).active == true
+          && showcaseItemOf(d).title == d.showcaseItemTitle;
+      }
+      function isValidOwnerChoice(oldData, d) {
+        return oldData.status == 'pending_payment'
+          && d.diff(oldData).affectedKeys().hasOnly(['type', 'amount', 'updatedAt'])
+          && d.updatedAt is string
+          && (
+            (d.type == null && d.amount == null)
+            || (d.type == 'code' && d.amount is number
+                && d.amount == showcaseItemOf(oldData).get('priceCode', null))
+            || (d.type == 'url' && d.amount is number
+                && d.amount == showcaseItemOf(oldData).get('priceUrl', null))
+          );
+      }
+      function isValidSupervisorOverride(oldData, d) {
+        return d.diff(oldData).affectedKeys().hasOnly(['status', 'paystackReference', 'updatedAt'])
+          && d.status in ['pending_payment', 'paid', 'awaiting_details', 'awaiting_images', 'in_progress', 'delivered']
+          && (d.paystackReference == null
+              || (d.paystackReference is string && d.paystackReference.size() <= 100))
+          && d.updatedAt is string;
+      }
+      // Phase 6. `l` is the exampleSites list; rules can't loop, so each of
+      // the (at most five) slots is checked by index. A slot past the end of
+      // the list is fine; a slot that exists must be a non-empty http(s) URL.
+      function isValidExampleSiteSlot(l, i) {
+        return l.size() <= i
+          || (l[i] is string && l[i].size() > 0 && l[i].size() <= 500
+              && l[i].matches('https?://.+'));
+      }
+      function isValidCloneDetails(c, updatedAt) {
+        return c is map
+          && c.keys().hasOnly([
+            'siteName', 'purpose', 'sections', 'branding',
+            'exampleSites', 'contact', 'submittedAt'
+          ])
+          && c.keys().hasAll([
+            'siteName', 'purpose', 'sections', 'branding',
+            'exampleSites', 'contact', 'submittedAt'
+          ])
+          && c.siteName is string && c.siteName.size() > 0 && c.siteName.size() <= 120
+          && c.purpose is string && c.purpose.size() > 0 && c.purpose.size() <= 1500
+          && c.sections is string && c.sections.size() > 0 && c.sections.size() <= 1500
+          && c.branding is string && c.branding.size() <= 1500
+          && c.contact is string && c.contact.size() > 0 && c.contact.size() <= 300
+          && c.exampleSites is list && c.exampleSites.size() <= 5
+          && isValidExampleSiteSlot(c.exampleSites, 0)
+          && isValidExampleSiteSlot(c.exampleSites, 1)
+          && isValidExampleSiteSlot(c.exampleSites, 2)
+          && isValidExampleSiteSlot(c.exampleSites, 3)
+          && isValidExampleSiteSlot(c.exampleSites, 4)
+          && c.submittedAt is string && c.submittedAt == updatedAt;
+      }
+      // PHASE 12. `cloneImages` entries as the OWNER may write them: the six
+      // pointer fields the upload endpoint itself stores, MINUS `verified`
+      // (deliberately not in hasOnly — a client can never set it; see the
+      // PHASE 12 comment on this match block for why that's what matters).
+      function isValidCloneImageEntry(e, updatedAt) {
+        return e is map
+          && e.keys().hasOnly([
+            'slotIndex', 'slotLabel', 'telegramMessageId', 'telegramFileId',
+            'originalFilename', 'uploadedAt'
+          ])
+          && e.keys().hasAll([
+            'slotIndex', 'slotLabel', 'telegramMessageId', 'telegramFileId',
+            'originalFilename', 'uploadedAt'
+          ])
+          && e.slotIndex is int && e.slotIndex >= 0 && e.slotIndex <= 11
+          && e.slotLabel is string && e.slotLabel.size() <= 200
+          && e.telegramMessageId is int && e.telegramMessageId >= 0
+          && e.telegramFileId is string && e.telegramFileId.size() <= 300
+          && e.originalFilename is string && e.originalFilename.size() <= 200
+          && e.uploadedAt is string && e.uploadedAt == updatedAt;
+      }
+      // Rules can't loop: every existing entry (there are at most 11 of them
+      // when this runs, since a full 12-slot array has nothing left to
+      // append) must be checked by index, same technique as
+      // isValidExampleSiteSlot above.
+      function cloneImagePrefixOk(oldList, newList, i) {
+        return oldList.size() <= i || newList[i] == oldList[i];
+      }
+      function cloneImagesPrefixUnchanged(oldList, newList) {
+        return cloneImagePrefixOk(oldList, newList, 0)
+          && cloneImagePrefixOk(oldList, newList, 1)
+          && cloneImagePrefixOk(oldList, newList, 2)
+          && cloneImagePrefixOk(oldList, newList, 3)
+          && cloneImagePrefixOk(oldList, newList, 4)
+          && cloneImagePrefixOk(oldList, newList, 5)
+          && cloneImagePrefixOk(oldList, newList, 6)
+          && cloneImagePrefixOk(oldList, newList, 7)
+          && cloneImagePrefixOk(oldList, newList, 8)
+          && cloneImagePrefixOk(oldList, newList, 9)
+          && cloneImagePrefixOk(oldList, newList, 10);
+      }
+      // Appends EXACTLY one well-formed entry to `cloneImages`, changing
+      // nothing else about the order and touching no earlier entry.
+      function isValidOwnerCloneImageAppend(oldData, d) {
+        return oldData.type == 'url'
+          && oldData.status == 'awaiting_images'
+          && d.diff(oldData).affectedKeys().hasOnly(['cloneImages', 'updatedAt'])
+          && d.updatedAt is string
+          && d.cloneImages is list
+          && oldData.get('cloneImages', []).size() <= 11
+          && d.cloneImages.size() == oldData.get('cloneImages', []).size() + 1
+          && cloneImagesPrefixUnchanged(oldData.get('cloneImages', []), d.cloneImages)
+          && isValidCloneImageEntry(
+               d.cloneImages[oldData.get('cloneImages', []).size()], d.updatedAt);
+      }
+      allow read: if isSupervisor()
+        || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow create: if request.auth != null
+        && isValidNewOrder(request.resource.data)
+        && isCheckoutOn();
+      allow update: if (request.auth != null
+          && resource.data.uid == request.auth.uid
+          && isValidOwnerChoice(resource.data, request.resource.data)
+          && isCheckoutOn())
+        || (request.auth != null
+          && resource.data.uid == request.auth.uid
+          && isValidOwnerCloneImageAppend(resource.data, request.resource.data))
+        || (isSupervisor()
+          && isValidSupervisorOverride(resource.data, request.resource.data));
+      allow delete: if false;
+    }
+    // Chat Neribo (Phase 7 of the Showcase/Orders build) — one-way messages
+    // from the Supervisor to a user, read by src/lib/chatNeriboPersistence.ts
+    // and shown in src/components/ChatNeriboView.tsx. Deliberately a
+    // SEPARATE collection from the chat threads (users/{uid}/chats) — the two
+    // are never merged.
+    //
+    // ONE-WAY, enforced here and not just by the UI:
+    //   - CREATE: nobody. Every message is written by the trusted backend's
+    //     service-account credential (which bypasses these rules):
+    //     functions/api/admin/send-chat-neribo-message.js (Supervisor-gated)
+    //     and the automatic "code purchased" message in
+    //     functions/api/payments/webhook.js. So no client — a regular user
+    //     OR a Supervisor — can create a message directly, whatever the UI
+    //     does.
+    //   - READ: the recipient (resource.data.uid == request.auth.uid — the
+    //     same per-uid pattern as `orders` above; a regular account's query
+    //     must carry where("uid", "==", <own uid>) because rules aren't
+    //     filters) or a Supervisor (who reads back what they sent).
+    //   - UPDATE: the recipient only, and ONLY the `acknowledged` boolean
+    //     ("Got it") — `text`, `linkUrl`, `uid` and every other field are
+    //     immutable to the client. Nobody else (Supervisor included) can
+    //     update.
+    //   - DELETE: nobody. Messages are never removed.
+    match /chatNeriboMessages/{messageId} {
+      allow read: if isSupervisor()
+        || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow create: if false;
+      allow update: if request.auth != null
+        && resource.data.uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['acknowledged'])
+        && request.resource.data.acknowledged is bool;
+      allow delete: if false;
+    }
+    // Domains (Phase 8 of the Showcase/Orders build) — manual-fulfillment
+    // domain-name requests, read/written by
+    // src/lib/domainRequestsPersistence.ts. A request only ever attaches
+    // to an existing `orders/{orderId}` document that is `type == 'url'`
+    // and already `in_progress`/`delivered` (a custom-site build, already
+    // paid for) — never a "code" order, and never an unpaid one.
+    //
+    // READ: the owner (resource.data.uid == request.auth.uid — same
+    // per-uid pattern as `orders`/`chatNeriboMessages` above; a regular
+    // account's query must carry where("uid","==",<own uid>)) or a
+    // Supervisor.
+    //
+    // CREATE (owner only): 2-5 candidate domain names, `status ==
+    // 'submitted'`, `pricing` empty, `chosenDomain`/`paystackReference`
+    // both null, and `orderId` must point at an existing order that is
+    // this same caller's own, `type == 'url'`, and already
+    // `in_progress`/`delivered`. No client can ever create a request
+    // already priced or paid, or attach one to someone else's order, a
+    // "code" order, or an order that hasn't reached that stage yet.
+    //
+    // UPDATE, two paths that can never overlap in what they may touch:
+    //   - Supervisor (Operations -> Domains Management): only `status` +
+    //     `pricing` + `paystackReference` + `updatedAt`. `pricing` must
+    //     stay the SAME LENGTH as `candidates` (immutable once created)
+    //     and parallel to it by index — isValidPricingSlot below checks
+    //     pricing[i].domain == candidates[i] for each of the (at most 5)
+    //     slots, so a Supervisor write can never desync which price goes
+    //     with which candidate. This is the same write path "Mark
+    //     availability/price" AND "Send pricing" both use (the brief's
+    //     two-step Supervisor action is just two different `status`
+    //     values written through this one rule) — a manual override to
+    //     'paid' is also allowed here, same escape-hatch precedent as
+    //     `orders`' isValidSupervisorOverride. Once a request IS 'paid' it
+    //     is locked: no Supervisor write can change it any more (checked
+    //     via oldData.status != 'paid' in isValidSupervisorPricing). The
+    //     payment webhook (service account) is unaffected.
+    //   - Owner, only while `status == 'awaiting_payment'`, only
+    //     `chosenDomain` + `updatedAt`: picking ONE priced, available
+    //     candidate to pay for. `chosenDomain` must equal one of
+    //     `candidates` at an index where `pricing` marks it available
+    //     with a set price — isValidChosenSlot below checks this per
+    //     index, so a client can never record a choice the Supervisor
+    //     hasn't actually priced and marked available.
+    // `status` and `paystackReference` are therefore never client-writable
+    // by a request's owner: only the payment webhook (service account,
+    // bypasses these rules) and a Supervisor can change them.
+    //
+    // DELETE: nobody. Requests are a record of what was asked for and
+    // (once paid) a payment record; they are never removed.
+    match /domainRequests/{requestId} {
+      function orderOf(d) {
+        return get(/databases/$(database)/documents/orders/$(d.orderId)).data;
+      }
+      function isValidCandidateSlot(l, i) {
+        return l.size() <= i
+          || (l[i] is string && l[i].size() > 0 && l[i].size() <= 253
+              && l[i].matches('^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\\.[A-Za-z]{2,}$'));
+      }
+      function isValidNewDomainRequest(d) {
+        return d.keys().hasOnly([
+            'id', 'uid', 'orderId', 'candidates', 'status', 'pricing',
+            'chosenDomain', 'paystackReference', 'createdAt', 'updatedAt'
+          ])
+          && d.keys().hasAll([
+            'id', 'uid', 'orderId', 'candidates', 'status', 'pricing',
+            'chosenDomain', 'paystackReference', 'createdAt', 'updatedAt'
+          ])
+          && d.id == requestId
+          && d.uid == request.auth.uid
+          && d.orderId is string && d.orderId.size() > 0 && d.orderId.size() <= 200
+          && d.candidates is list && d.candidates.size() >= 2 && d.candidates.size() <= 5
+          && isValidCandidateSlot(d.candidates, 0)
+          && isValidCandidateSlot(d.candidates, 1)
+          && isValidCandidateSlot(d.candidates, 2)
+          && isValidCandidateSlot(d.candidates, 3)
+          && isValidCandidateSlot(d.candidates, 4)
+          && d.status == 'submitted'
+          && d.pricing is list && d.pricing.size() == 0
+          && d.chosenDomain == null
+          && d.paystackReference == null
+          && d.createdAt is string
+          && d.updatedAt is string
+          && exists(/databases/$(database)/documents/orders/$(d.orderId))
+          && orderOf(d).uid == request.auth.uid
+          && orderOf(d).type == 'url'
+          && orderOf(d).status in ['in_progress', 'delivered'];
+      }
+      function isValidPricingSlot(pricing, candidates, i) {
+        return pricing.size() <= i
+          || (pricing[i] is map
+              && pricing[i].keys().hasOnly(['domain', 'available', 'price'])
+              && pricing[i].keys().hasAll(['domain', 'available', 'price'])
+              && pricing[i].domain == candidates[i]
+              && pricing[i].available is bool
+              && (pricing[i].price == null || (pricing[i].price is number && pricing[i].price > 0)));
+      }
+      function isValidSupervisorPricing(oldData, d) {
+        return oldData.status != 'paid'
+          && d.diff(oldData).affectedKeys().hasOnly(['status', 'pricing', 'paystackReference', 'updatedAt'])
+          && d.status in ['submitted', 'checked', 'awaiting_payment', 'paid']
+          && d.pricing is list && d.pricing.size() == oldData.candidates.size()
+          && isValidPricingSlot(d.pricing, oldData.candidates, 0)
+          && isValidPricingSlot(d.pricing, oldData.candidates, 1)
+          && isValidPricingSlot(d.pricing, oldData.candidates, 2)
+          && isValidPricingSlot(d.pricing, oldData.candidates, 3)
+          && isValidPricingSlot(d.pricing, oldData.candidates, 4)
+          && (d.paystackReference == null
+              || (d.paystackReference is string && d.paystackReference.size() <= 100))
+          && d.updatedAt is string;
+      }
+      // `i` ranges over the (at most 5) candidate slots. If candidates[i]
+      // isn't the domain being chosen, this slot imposes no constraint;
+      // if it IS, pricing at that same index must mark it available with
+      // a real price. Combined with `candidates.hasAny([chosen])` below,
+      // this can only pass if the chosen domain is both a real candidate
+      // AND priced+available at its own index.
+      function isValidChosenSlot(pricing, candidates, i, chosen) {
+        return candidates.size() <= i
+          || candidates[i] != chosen
+          || (pricing.size() > i && pricing[i].available == true
+              && pricing[i].price is number && pricing[i].price > 0);
+      }
+      function isValidOwnerChosenDomain(oldData, d) {
+        return oldData.status == 'awaiting_payment'
+          && d.diff(oldData).affectedKeys().hasOnly(['chosenDomain', 'updatedAt'])
+          && d.chosenDomain is string
+          && oldData.candidates.hasAny([d.chosenDomain])
+          && d.updatedAt is string
+          && isValidChosenSlot(oldData.pricing, oldData.candidates, 0, d.chosenDomain)
+          && isValidChosenSlot(oldData.pricing, oldData.candidates, 1, d.chosenDomain)
+          && isValidChosenSlot(oldData.pricing, oldData.candidates, 2, d.chosenDomain)
+          && isValidChosenSlot(oldData.pricing, oldData.candidates, 3, d.chosenDomain)
+          && isValidChosenSlot(oldData.pricing, oldData.candidates, 4, d.chosenDomain);
+      }
+      allow read: if isSupervisor()
+        || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow create: if request.auth != null && isValidNewDomainRequest(request.resource.data);
+      allow update: if (isSupervisor() && isValidSupervisorPricing(resource.data, request.resource.data))
+        || (request.auth != null
+          && resource.data.uid == request.auth.uid
+          && isValidOwnerChosenDomain(resource.data, request.resource.data));
+      allow delete: if false;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

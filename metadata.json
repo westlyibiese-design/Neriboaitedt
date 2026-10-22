@@ -1,0 +1,7 @@
+{
+  "name": "Neribo",
+  "description": "The AI for problem solvers. Modern conversational AI assistant with intelligent capabilities, projects, artifacts, and multi-account workflows.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": []
+}
+

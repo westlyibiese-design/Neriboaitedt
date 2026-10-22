@@ -1,0 +1,212 @@
+@import "tailwindcss";
+@import "highlight.js/styles/github-dark.css";
+
+@layer base {
+  :root {
+    --font-serif: 'Newsreader', 'Playfair Display', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    /* Color Mode: real theme tokens driven by html[data-theme].
+       Default (and html[data-theme="dark"]) is Neribo's refined dark
+       theme — pushed further off near-black after direct feedback that
+       the first pass ("Do not simply make the entire application
+       black") still read as too dark. Went a step lighter than the
+       Westly HMS reference's own numbers this time (sampled: page
+       ~#151a25, card ~#181d2a — both roughly this dark theme's OLD
+       bg-0), since matching HMS's own darkness exactly wasn't enough of
+       a visible change. Neribo's neutral-gray hue is kept (no navy
+       tint, no gold accent) — only lightness/contrast moved. */
+    --bg-0: #18181c; /* page background */
+    --bg-1: #212127; /* card / panel */
+    --bg-2: #232329; /* modal / composer */
+    --bg-3: #29292f; /* elevated surface / active nav / inputs */
+    --bg-4: #1c1c21; /* deep inset input background */
+    --border-1: #3a3a42;
+    --fg-0: #f3f4f6;
+    --fg-1: #a1a1aa;
+
+    /* ---- Semantic tokens (Phase A foundation) --------------------------
+       Thin aliases over the --bg-*, --fg-*, --border-1 primitives above,
+       named after the role a surface/text plays rather than its raw
+       lightness slot. Defined ONCE here (not repeated inside the
+       "midnight" or "light" html[data-theme] blocks below) because CSS
+       custom properties resolve at paint time: var(--card) always tracks
+       whatever --bg-1 currently *is* under the active data-theme, "light"
+       and "midnight" included, so redefining these per-theme would just
+       be redundant. Components should reach for these semantic names
+       going forward; the raw --bg-*, --fg-*, --border-1 primitives stay in
+       place unchanged for existing code that already depends on them
+       (e.g. Device Settings). Phases B and C: these are the names to
+       build against.
+
+       Every hardcoded Tailwind color class this phase found (text-white,
+       bg-neutral-800, border-neutral-800, bg-black, etc.) has been
+       replaced in its in-scope files with one of the tokens below via
+       Tailwind's arbitrary-value syntax, e.g. bg-[var(--card)]. */
+
+    /* Card / panel — the base "raised" surface within the page (list
+       rows, stat tiles, message bubbles' containers, settings sections). */
+    --card: var(--bg-1);
+    --card-foreground: var(--fg-0);
+
+    /* Popover / modal / composer — a further-raised surface for anything
+       that floats above cards: dialogs, dropdowns, the chat composer bar,
+       the notification center panel. */
+    --popover: var(--bg-2);
+    --popover-foreground: var(--fg-0);
+
+    /* Elevated — hovered/active/selected state background for nav items,
+       list rows, menu entries, chips. Same slot as --bg-3 today; kept as
+       its own name (rather than reused inline) so a later pass can retune
+       hover/active backgrounds independently of --secondary/--muted/
+       --accent below without them staying accidentally coupled forever. */
+    --elevated: var(--bg-3);
+    --elevated-foreground: var(--fg-0);
+
+    /* Inputs and textareas. */
+    --input: var(--bg-4);
+    --input-foreground: var(--fg-0);
+    --input-border: var(--border-1);
+    --placeholder: var(--fg-1);
+
+    /* Secondary buttons/pills (e.g. "Refresh", cancel actions). */
+    --secondary: var(--bg-3);
+    --secondary-foreground: var(--fg-0);
+
+    /* Muted — de-emphasized helper text, disabled states, subtle badge
+       fills, timestamps, caption text. */
+    --muted: var(--bg-3);
+    --muted-foreground: var(--fg-1);
+
+    /* Accent — hover/selected background for nav/menu/list entries
+       (distinct name from --elevated for the same reason as above). */
+    --accent: var(--bg-3);
+    --accent-foreground: var(--fg-0);
+
+    /* Primary CTA — Neribo's own existing button identity (the "+ New"
+       button, primary submit buttons): a full-contrast fg-on-bg
+       inversion, so it's a light pill with dark text in Dark mode and a
+       dark pill with light text in Light mode. Intentionally NOT copied
+       from HMS's navy/gold primary — this preserves Neribo's own look. */
+    --primary: var(--fg-0);
+    --primary-foreground: var(--bg-0);
+
+    /* Border/divider — alias of --border-1 under the more common
+       semantic name, for parity with what Phase B/C will expect. */
+    --border: var(--border-1);
+
+    /* Focus ring / interactive brand accent — Neribo's existing blue
+       (already used throughout for links, selected radio/checkbox
+       states, and focus rings). Deliberately constant across themes,
+       like a brand color, rather than derived from --bg-*, --fg-* values: this
+       phase leaves every existing blue-500/blue-600 use as-is (per the
+       "don't touch legitimately theme-constant brand/semantic colors"
+       rule) and only adds this token so new/rewired focus states have a
+       single name to reach for. */
+    --ring: #3b82f6;
+    --ring-foreground: #ffffff;
+
+    /* Destructive — constant brand red for delete/error actions, same
+       reasoning as --ring. Only the *container* around destructive UI
+       (its card/badge background, border) should adapt between themes;
+       that's handled by using --card/--muted/--border for the container
+       and this token only for the red itself. */
+    --destructive: #ef4444;
+    --destructive-foreground: #ffffff;
+
+    /* Font Size: multiplies the whole app shell's visual size. */
+    --ui-zoom: 1;
+  }
+
+  html[data-theme="midnight"] {
+    --bg-0: #05060a;
+    --bg-1: #0d0f16;
+    --bg-2: #10121b;
+    --bg-3: #161925;
+    --bg-4: #0b0d13;
+    --border-1: #1f2430;
+    --fg-0: #f5f7fb;
+    --fg-1: #93a0b8;
+  }
+
+  html[data-theme="light"] {
+    --bg-0: #f7f7f8;
+    --bg-1: #ffffff;
+    --bg-2: #ffffff;
+    --bg-3: #f0f0f2;
+    --bg-4: #f2f2f4;
+    --border-1: #e4e4e7;
+    --fg-0: #18181b;
+    --fg-1: #52525b;
+  }
+
+  html[data-font-size="Small"] {
+    --ui-zoom: 0.92;
+  }
+  html[data-font-size="Large"] {
+    --ui-zoom: 1.12;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: var(--bg-0);
+    color: var(--fg-0);
+  }
+}
+
+/* Font Size setting: scales the root rem unit instead of using the
+   non-standard `zoom` property. `zoom` visually rescaled the whole app
+   shell, but `vh`/`vw` units and `position: fixed`/`sticky` elements
+   inside a zoomed ancestor are resolved against the *real* viewport by
+   the browser and then painted at the zoomed scale on top of that -
+   the two math against different coordinate spaces. That mismatch is
+   what caused layout (the composer's model picker, full-height panels,
+   the sidebar drawer) to overflow or clip whenever Font Size was set to
+   anything other than Default. Scaling `html { font-size }` instead
+   scales every rem-based Tailwind size (the vast majority of this app's
+   spacing/typography) while leaving vh/vw/fixed/sticky math untouched,
+   so it stays correct at any Font Size setting and any viewport size. */
+html {
+  font-size: calc(16px * var(--ui-zoom));
+}
+
+.font-serif {
+  font-family: 'Newsreader', 'Playfair Display', Georgia, serif;
+}
+
+.font-sans {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.font-mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Custom subtle scrollbar — was fixed dark-only (#27272a/#3f3f46), which
+   made scrollbars invisible against the Light theme's near-white
+   surfaces. Tied to --muted/--border-1 so it adapts per data-theme. */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-1);
+}
+
+/* Pairs with src/components/MarkdownRenderer.tsx: the highlight.js theme
+   above supplies token colors for fenced code blocks, but its own
+   background/padding is neutralized here because MarkdownRenderer already
+   draws the code block chrome (header, copy button, rounded border). */
+.markdown-body pre code.hljs {
+  background: transparent !important;
+  padding: 0 !important;
+}
+

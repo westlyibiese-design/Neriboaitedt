@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 64" width="248" height="64" fill="none">
+  <!-- Brand icon: gradient ring open on the right, three coral triangles -->
+  <g transform="translate(-28.480,-18.064) scale(0.11200)">
+    <defs>
+      <linearGradient id="ringGrad" x1="20%" y1="8%" x2="78%" y2="92%">
+        <stop offset="0%" stop-color="#E5943A"/>
+        <stop offset="55%" stop-color="#CD7A2E"/>
+        <stop offset="100%" stop-color="#9C431E"/>
+      </linearGradient>
+    </defs>
+    <path d="M 638.2 269.9 A 202.5 202.5 0 1 0 638.2 624.1" fill="none" stroke="url(#ringGrad)" stroke-width="67" stroke-linecap="round"/>
+    <polygon points="655,296 655,396 822,346" fill="#D95C33"/>
+    <polygon points="655,497 655,598 822,548" fill="#D95C33"/>
+    <polygon points="655,373 655,520 898,447" fill="#EFA029"/>
+  </g>
+  <!-- Wordmark 'Neribo' — bold sans, matches src/components/NeriboLogo.tsx -->
+  <text x="82" y="41" fill="#F3F4F6" font-family="'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="30" font-weight="700" letter-spacing="-0.02em">Neribo</text>
+</svg>

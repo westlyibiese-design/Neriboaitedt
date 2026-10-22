@@ -1,0 +1,71 @@
+# Calls Neribo's quota-reset sweep endpoint on a schedule, from outside
+# Cloudflare — this is the actual "scheduler" for automatic quota resets.
+#
+# Why this exists: Cloudflare Pages projects can't register a Cron
+# Trigger (that's a Cloudflare Workers-only feature), so
+# functions/api/admin/reset-expired-quotas.js has no way to run itself
+# on a timer. This workflow is what runs it instead, independent of
+# whether any user opens the app, sends a message, or is even online.
+#
+# ---------------------------------------------------------------------
+# One-time setup required (see delivery notes)
+# ---------------------------------------------------------------------
+# 1. In this repo: Settings → Secrets and variables → Actions →
+#    New repository secret, named RESET_QUOTAS_SECRET, with the SAME
+#    value you set for RESET_QUOTAS_SECRET in Cloudflare Pages'
+#    environment variables. They must match exactly, or every run below
+#    gets a 401 from the endpoint.
+# 2. Nothing else — this file alone is enough once that secret exists.
+#
+# GitHub disables a scheduled workflow automatically if a repo goes 60
+# days with no commits/pushes. Not a concern for an actively-developed
+# repo, but worth knowing if this project ever goes quiet for a while —
+# check Actions → this workflow → re-enable if so.
+
+name: Reset expired quotas
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub documents scheduled workflows as
+    # "best effort" — under load, a run can fire a few minutes late.
+    # That's fine here: a quota reset a few minutes after its exact
+    # instant is still far better than waiting for a chat message that
+    # might never come.
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {} # lets you trigger a run manually from the Actions tab, for testing
+
+jobs:
+  reset-expired-quotas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call the reset-expired-quotas endpoint
+        run: |
+          response=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://neribo.pages.dev/api/admin/reset-expired-quotas" \
+            -H "Authorization: Bearer ${{ secrets.RESET_QUOTAS_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.json
+          if [ "$response" -ge 300 ]; then
+            echo "::error::reset-expired-quotas returned HTTP $response"
+            exit 1
+          fi
+      # Reconciles every locally-"pro" account against Paystack's own
+      # live subscription status, so a cancellation on Paystack that a
+      # webhook ever missed still gets caught and corrected within 10
+      # minutes instead of staying wrong indefinitely — see
+      # functions/api/admin/sync-paystack-subscriptions.js for the full
+      # reasoning. Same secret, same trust model, same schedule as the
+      # step above; deliberately a second step rather than a second
+      # workflow file, since both are the same "call our own scheduled
+      # endpoint" job.
+      - name: Call the sync-paystack-subscriptions endpoint
+        run: |
+          response=$(curl -s -o /tmp/response2.json -w "%{http_code}" \
+            -X POST "https://neribo.pages.dev/api/admin/sync-paystack-subscriptions" \
+            -H "Authorization: Bearer ${{ secrets.RESET_QUOTAS_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response2.json
+          if [ "$response" -ge 300 ]; then
+            echo "::error::sync-paystack-subscriptions returned HTTP $response"
+            exit 1
+          fi
